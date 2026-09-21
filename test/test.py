@@ -3,38 +3,101 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import FallingEdge, Timer
+
+LOAD, OE, EN = 1 << 0, 1 << 1, 1 << 2
 
 
-@cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start")
+async def tick(dut, n=1):
+    for _ in range(n):
+        await FallingEdge(dut.clk)
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
 
-    # Reset
-    dut._log.info("Reset")
+def count(dut):
+    return int(dut.uo_out.value)
+
+
+async def setup(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, "us").start())
     dut.ena.value = 1
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await tick(dut, 3)
+    dut.rst_n.value = 1
+    await tick(dut)
+
+
+@cocotb.test()
+async def test_reset(dut):
+    await setup(dut)
+    assert count(dut) == 0, "count should be 0 after reset"
+
+
+@cocotb.test()
+async def test_counting_and_hold(dut):
+    await setup(dut)
+    dut.ui_in.value = EN
+    await tick(dut, 5)
+    assert count(dut) == 5, f"need 5, got {count(dut)}"
+
+    dut.ui_in.value = 0          # EN off: should hold
+    await tick(dut, 4)
+    assert count(dut) == 5, "count changed while EN was 0"
+
+
+@cocotb.test()
+async def test_sync_load(dut):
+    await setup(dut)
+    dut.uio_in.value = 0xA5
+    dut.ui_in.value = LOAD
+    await Timer(1, "us")         # no clock edge yet
+    assert count(dut) == 0, "load must wait for the clock (synchronous)"
+    await tick(dut)
+    assert count(dut) == 0xA5, f"expected 0xA5, got {count(dut):#04x}"
+
+
+@cocotb.test()
+async def test_load_beats_enable(dut):
+    await setup(dut)
+    dut.uio_in.value = 0x40
+    dut.ui_in.value = LOAD | EN
+    await tick(dut)
+    assert count(dut) == 0x40, "load should take priority over count enable"
+
+
+@cocotb.test()
+async def test_wraparound(dut):
+    await setup(dut)
+    dut.uio_in.value = 0xFE
+    dut.ui_in.value = LOAD
+    await tick(dut)
+    dut.ui_in.value = EN
+    await tick(dut, 3)           # FE -> FF -> 00 -> 01
+    assert count(dut) == 0x01, f"expected wrap to 0x01, got {count(dut):#04x}"
+
+
+@cocotb.test()
+async def test_async_reset(dut):
+    await setup(dut)
+    dut.ui_in.value = EN
+    await tick(dut, 7)
+    assert count(dut) == 7
+    dut.rst_n.value = 0
+    await Timer(1, "us")         # mid-cycle, no clock edge
+    assert count(dut) == 0, "reset must clear immediately (asynchronous)"
     dut.rst_n.value = 1
 
-    dut._log.info("Test project behavior")
 
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
+@cocotb.test()
+async def test_tristate(dut):
+    await setup(dut)
+    dut.uio_in.value = 0x3C
+    dut.ui_in.value = LOAD       # OE off while loading
+    await tick(dut)
+    assert int(dut.uio_oe.value) == 0x00, "bus should be high-Z when OE=0"
 
-    # Wait for one clock cycle to see the output values
-    await ClockCycles(dut.clk, 1)
-
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
-
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+    dut.ui_in.value = OE
+    await tick(dut)
+    assert int(dut.uio_oe.value) == 0xFF, "bus should drive when OE=1"
+    assert int(dut.uio_out.value) == 0x3C, "bus should carry the count"
