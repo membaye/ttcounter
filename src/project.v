@@ -35,7 +35,6 @@ module tt_um_counter (
   assign uio_out = count;
   assign uio_oe  = {8{oe}};
 
-  // List all unused inputs to prevent warnings
   wire _unused = &{ena, ui_in[7:3], 1'b0};
 
 endmodule
